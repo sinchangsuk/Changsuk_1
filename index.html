@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Auto Play</title>
+  <style>
+    #tapOverlay{
+      position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+      font: 16px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      background: rgba(0,0,0,.6); color:#fff; z-index:9999;
+    }
+  </style>
+</head>
+<body>
+  <audio id="bgm" src="test.m4a" preload="auto"></audio>
+
+  <div id="tapOverlay">화면을 터치하면 음성이 재생됩니다</div>
+
+  <script>
+    (function(){
+      const audio = document.getElementById('bgm');
+      const overlay = document.getElementById('tapOverlay');
+
+      const AC = window.AudioContext || window.webkitAudioContext;
+      const ctx = AC ? new AC() : null;
+
+      let unlocked = false;
+
+      async function unlockAndPlay(){
+        if (unlocked) return;
+        unlocked = true;
+
+        if (ctx && ctx.state === 'suspended') {
+          try { await ctx.resume(); } catch(e){}
+        }
+
+        try {
+          audio.muted = true;
+          await audio.play();
+
+          requestAnimationFrame(() => { audio.muted = false; });
+        } catch (err) {
+          try { await audio.play(); } catch(e){}
+        }
+
+        if (overlay) overlay.style.display = 'none';
+
+        removeAll();
+      }
+
+      function addAll(){
+        document.addEventListener('pointerdown', unlockAndPlay, {once:true, passive:true});
+        document.addEventListener('touchstart',  unlockAndPlay, {once:true, passive:true});
+        document.addEventListener('click',       unlockAndPlay, {once:true});
+      }
+
+      function removeAll(){
+        document.removeEventListener('pointerdown', unlockAndPlay, {once:true});
+        document.removeEventListener('touchstart',  unlockAndPlay, {once:true});
+        document.removeEventListener('click',       unlockAndPlay, {once:true});
+      }
+
+      audio.load();
+      addAll();
+
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && !audio.paused) audio.play().catch(()=>{});
+      });
+    })();
+  </script>
+</body>
+</html>
