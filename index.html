@@ -1,85 +1,130 @@
 <!doctype html>
+<html lang="ko">
+<head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Tap Anywhere to Play (m4a)</title>
 <style>
-  #tap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
-  background:rgba(0,0,0,.6);color:#fff;font:16px/1.5 system-ui,-apple-system,Roboto,Arial,sans-serif}
+  html,body{height:100%;margin:0}
+  #overlay{
+    position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    font:16px/1.5 system-ui,-apple-system,Roboto,Arial,sans-serif;
+    color:#fff; background:rgba(0,0,0,.65); text-align:center; padding:24px; cursor:pointer; user-select:none;
+  }
+  #hint{opacity:.8; font-size:13px; margin-top:8px}
 </style>
-
-<div id="tap">화면을 터치하면 재생됩니다</div>
+</head>
+<body>
+  <div id="overlay">
+    화면을 터치하면 음성이 재생됩니다
+    <div id="hint">(iOS는 무음 스위치/볼륨에 영향받을 수 있습니다)</div>
+  </div>
 
 <script>
 (function(){
-  const URL_M4A = "https://sinchangsuk.github.io/Changsuk_1/test.m4a";
+  const FILE_URL = "https://sinchangsuk.github.io/Changsuk_1/test.m4a";
 
+  // ------- 1) HTMLAudio로 즉시 재생 시도 -------
+  async function tryHTMLAudioPlay(){
+    const a = new Audio();
+    a.setAttribute('playsinline','');  // iOS 인라인 재생
+    a.preload = "auto";
+    a.src = FILE_URL;                  // 제스처 시점에 src 세팅
+    a.volume = 1.0;
+
+    // 포그라운드 복귀 시 재시도
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && a.paused) a.play().catch(()=>{});
+    });
+
+    await a.play(); // 제스처 컨텍스트 내 동기 호출
+    return a;       // 성공 시 오디오 객체 반환
+  }
+
+  // ------- 2) 실패 시 Web Audio로 디코드 재생 -------
+  async function tryWebAudioPlay(){
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) throw new Error("AudioContext not supported");
+
+    const ctx = new AC();
+    if (ctx.state === "suspended") {
+      try { await ctx.resume(); } catch(_) {}
+    }
+
+    // 동일 출처에서 가져와야 CORS 이슈 없음
+    const resp = await fetch(FILE_URL, { cache: "force-cache" });
+    if (!resp.ok) throw new Error("HTTP "+resp.status);
+
+    const arr = await resp.arrayBuffer();
+
+    // iOS 호환: 콜백 래핑 사용
+    const buf = await new Promise((res, rej)=> ctx.decodeAudioData(arr, res, rej));
+
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
+    src.start(0);
+
+    // 재생 컨트롤 객체처럼 반환 (paused=false로 간주)
+    return { paused:false, _ctx:ctx };
+  }
+
+  // ------- 3) 터치(어디든) → 재생 시퀀스 -------
   let started = false;
   async function start(){
     if (started) return; started = true;
+    setOverlay("재생 준비 중…");
 
-    // ① 제스처 안에서 "그때" 생성 + src 세팅
-    const a = new Audio();
-    a.preload = "auto";
-    a.playsInline = true;  // iOS
-    a.src = URL_M4A;       // 여기서 세팅해야 제스처 맥락 유지 확률↑
-    a.volume = 1.0;
-
+    // 3-1) HTMLAudio 우선
     try {
-      // ② 바로 play() (동기 맥락)
-      await a.play();
-      document.getElementById('tap').style.display = 'none';
-
-      // ③ 백그라운드 복귀시 끊기면 재시도
-      document.addEventListener('visibilitychange', () => {
-        if (!document.hidden && a.paused) a.play().catch(()=>{});
-      });
-
-    } catch (e) {
-      console.log('HTMLAudio failed:', e);
-      // 실패시 WebAudio 백업으로 전환
-      startWebAudio();
+      await tryHTMLAudioPlay();
+      hideOverlay();
+      return;
+    } catch (e1) {
+      console.log("[HTMLAudio] failed:", e1?.name, e1?.message || e1);
     }
 
-    remove();
+    // 3-2) WebAudio 백업
+    try {
+      await tryWebAudioPlay();
+      hideOverlay();
+      return;
+    } catch (e2) {
+      console.log("[WebAudio] failed:", e2?.name, e2?.message || e2);
+    }
+
+    // 3-3) 짧은 지연 후 마지막 재시도 (네트워크 지연/첫터치 타이밍 문제 보정)
+    setOverlay("재시도 중…");
+    setTimeout(async () => {
+      try {
+        await tryHTMLAudioPlay();
+        hideOverlay();
+      } catch(e3) {
+        console.log("[HTMLAudio retry] failed:", e3?.name, e3?.message || e3);
+        try {
+          await tryWebAudioPlay();
+          hideOverlay();
+        } catch(e4){
+          console.log("[WebAudio retry] failed:", e4?.name, e4?.message || e4);
+          setOverlay("재생 실패 ❌\n• iPhone 무음 스위치/볼륨 확인\n• 크롬 사이트 음소거 해제\n• 네트워크 상태 점검 후 다시 터치");
+          started = false; // 사용자가 다시 터치하면 재시작 가능
+        }
+      }
+    }, 60);
   }
 
-  function remove(){
-    document.removeEventListener('pointerdown', start, {once:true});
-    document.removeEventListener('touchend', start, {once:true});
-    document.removeEventListener('click', start, {once:true});
-  }
+  // ------- 4) 어디든 첫 터치 바인딩 -------
+  const overlay = document.getElementById('overlay');
+  function hideOverlay(){ if (overlay) overlay.style.display = 'none'; }
+  function setOverlay(msg){ if (overlay) overlay.firstChild.textContent = msg; }
 
+  // pointerdown이 가장 확실, 보강으로 touchend/click도
   document.addEventListener('pointerdown', start, { once:true, passive:true });
   document.addEventListener('touchend',    start, { once:true, passive:true });
   document.addEventListener('click',       start, { once:true });
 
-  // ---- WebAudio 백업 ----
-  function startWebAudio(){
-    const AC = window.AudioContext || window.webkitAudioContext;
-    if (!AC) return; // 구형 브라우저
-    const ctx = new AC();
-
-    const tryStart = async () => {
-      try { if (ctx.state === 'suspended') await ctx.resume(); } catch(_){}
-      try {
-        const resp = await fetch(URL_M4A, { cache: 'force-cache' }); // 동일 출처
-        if (!resp.ok) throw new Error('HTTP '+resp.status);
-        const arr = await resp.arrayBuffer();
-        const buf = await new Promise((res, rej)=> ctx.decodeAudioData(arr, res, rej));
-        const src = ctx.createBufferSource();
-        src.buffer = buf;
-        src.connect(ctx.destination);
-        src.start(0);
-        document.getElementById('tap').style.display = 'none';
-      } catch(err){
-        console.log('WebAudio failed:', err);
-        // 여전히 실패면 사용자에게 볼륨/무음/코덱 메시지
-        const t = document.getElementById('tap');
-        t.textContent = '재생 실패: iOS 무음 스위치/볼륨 또는 파일 코덱(AAC-LC) 확인 후 다시 터치';
-        started = false; // 재시도 허용
-      }
-    };
-    tryStart();
-  }
+  // (선택) iOS에서 간혹 첫 로드 후 사용자 제스처까지 시간이 길면 오디오 디코더가 냉기동 상태 → 문제없음.
 })();
 </script>
+</body>
+</html>
