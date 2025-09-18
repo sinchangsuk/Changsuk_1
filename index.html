@@ -3,148 +3,195 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Tap Anywhere to Play (m4a, hardened)</title>
+<title>Tap Anywhere to Play (m4a, accessible)</title>
 <style>
+  :root{
+    --BODY_BG_URL: ""; /* 예: url('cover.jpg') */
+  }
+
   html,body{height:100%;margin:0}
-  #overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
-    background:rgba(0,0,0,.7);color:#fff;font:16px/1.5 system-ui,-apple-system,Roboto,Arial,sans-serif;
-    text-align:center;padding:24px;cursor:pointer;user-select:none}
-  #hint{opacity:.8;font-size:13px;margin-top:6px}
+  body{
+    /* 재생 전에도 보이지만 오버레이가 덮고 있음 */
+    background:
+      radial-gradient(120% 120% at 10% 0%, #1b1f3a, transparent 60%),
+      radial-gradient(120% 120% at 90% 100%, #2b4a7c, transparent 60%),
+      linear-gradient(160deg, #0f1020, #0b0c19);
+    background-attachment: fixed;
+  }
+  /* 배경 이미지가 있으면 그라데이션 위에 얹기 */
+  body.playing{
+    background-image:
+      var(--BODY_BG_URL),
+      radial-gradient(120% 120% at 10% 0%, #1b1f3a, transparent 60%),
+      radial-gradient(120% 120% at 90% 100%, #2b4a7c, transparent 60%),
+      linear-gradient(160deg, #0f1020, #0b0c19);
+    background-size:
+      cover, auto, auto, auto;
+    background-position:
+      center center, center, center, center;
+    background-repeat:
+      no-repeat, no-repeat, no-repeat, no-repeat;
+  }
+
+  /* 과도한 움직임 줄이기: 사용자 선호 존중 */
+  @media (prefers-reduced-motion: no-preference){
+    body.playing{
+      animation: hueShift 18s linear infinite;
+    }
+    @keyframes hueShift{
+      0%{ filter: hue-rotate(0deg) }
+      100%{ filter: hue-rotate(15deg) }
+    }
+  }
+
+  /* 오버레이: 심플+큰 글자 */
+  #overlay{
+    position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    background:rgba(0,0,0,.72); color:#fff; text-align:center; cursor:pointer; user-select:none;
+    padding:24px;
+  }
+  /* 중장년층 가독성: 큰 글자 + 굵게 + 행간 */
+  #overlayText{
+    font: 700 clamp(22px, 6vw, 40px) / 1.35 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    letter-spacing: 0.2px;
+  }
+
+  /* 재생 중 표시 배지 */
+  #playingBadge{
+    position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 14px; border-radius: 999px;
+    background: rgba(0,0,0,.55); color: #fff;
+    font: 600 14px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    backdrop-filter: blur(6px);
+    opacity: 0; pointer-events: none; transition: opacity .35s ease;
+  }
+  body.playing #playingBadge{ opacity: 1 }
+
+  .dot{
+    width:10px; height:10px; border-radius:50%;
+    background:#7cffb2;
+    box-shadow: 0 0 10px #7cffb2;
+  }
+  @media (prefers-reduced-motion: no-preference){
+    .dot{ animation: pulse 1.4s ease-in-out infinite }
+    @keyframes pulse{
+      0%,100%{ transform: scale(1); opacity: .9 }
+      50%{ transform: scale(1.25); opacity: 1 }
+    }
+  }
 </style>
 </head>
 <body>
+  <!-- 재생 전 안내(심플/큰 글자) -->
   <div id="overlay">
-    화면 아무 곳이나 한 번만 터치하면 재생됩니다 🎵
-    <div id="hint">(iPhone: 무음 스위치/볼륨/사이트 음소거 확인)</div>
+    <div id="overlayText">화면 아무 곳이나 터치하면 재생됩니다</div>
+  </div>
+
+  <!-- 재생 중 배지 -->
+  <div id="playingBadge" aria-live="polite" aria-atomic="true">
+    <span class="dot" aria-hidden="true"></span>
+    <span>재생 중</span>
   </div>
 
 <script>
 (function(){
-  const FILE_URL = "test.m4a"; // 같은 폴더 기준 (동일 출처 유지)
+  const FILE_URL = "test.m4a"; // 같은 폴더 기준
 
-  // ---- 0) 요소/컨텍스트 준비 (전역 생성 X, 제스처 안에서 생성할 것들만 남겨둠)
   let started = false;
-
-  // ---- 1) 제스처 핸들러: iOS에서 가장 안정적인 'touchend' 우선
   function bindOnce(){
-    // passive:false 로 둬야 iOS가 '사용자 활성화'로 판정하는 케이스가 있음
     document.addEventListener('touchend', onGesture, { once:true, passive:false });
     document.addEventListener('click',    onGesture, { once:true });
-    // 일부 안드로이드/데스크탑 대비
     document.addEventListener('mouseup',  onGesture, { once:true });
   }
 
-  async function onGesture(ev){
+  async function onGesture(){
     if (started) return; started = true;
     try {
-      // ---- 2) Web Audio 언락 (가청 경로 열기)
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) throw new Error('AudioContext unsupported');
       const ctx = new AC();
-
-      // 사용자 제스처 안에서 즉시 resume
       if (ctx.state === 'suspended') { await ctx.resume(); }
 
-      // 초단기 무음 오실레이터로 오디오 경로를 '실제로' 울려줌 (일부 기기 필요)
+      // 무음 오실레이터로 오디오 경로 언락
       const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      gain.gain.value = 0.00001; // 사실상 무음
-      osc.connect(gain).connect(ctx.destination);
-      osc.start();
-      // 30ms 후 정지 (동기 체인 유지)
-      setTimeout(()=>{ try{osc.stop();}catch(_){ } }, 30);
+      const gain = ctx.createGain(); gain.gain.value = 0.00001;
+      osc.connect(gain).connect(ctx.destination); osc.start();
+      setTimeout(()=>{ try{osc.stop();}catch(_){} }, 30);
 
-      // ---- 3) HTMLAudio를 제스처 안에서 동적 생성 + 즉시 play
       const a = new Audio();
       a.setAttribute('playsinline','');
       a.preload = 'auto';
-      a.src = FILE_URL;   // 제스처 시점에 src 지정
-      a.crossOrigin = 'anonymous'; // same-origin이지만 MediaElementSource 호환을 위해
+      a.src = FILE_URL;
+      a.crossOrigin = 'anonymous';
       a.volume = 1.0;
 
-      // MediaElementSource로 경유 → 일부 정책/디바이스에서 성공률↑
       const source = ctx.createMediaElementSource(a);
       source.connect(ctx.destination);
-
-      // iOS가 첫 프레임 로딩 중 play 거부하는 케이스 방지: load 후 즉시 시도
       a.load();
 
-      // 동기 컨텍스트에서 바로 호출 (await로 지연 만들지 않음)
       let playPromise;
       try {
         playPromise = a.play();
       } catch(eImmediate){
-        // play()가 즉시 예외면 곧바로 WebAudio decode 폴백
         return fallbackDecode(ctx);
       }
 
-      // 일부 브라우저는 Promise 반환 → 동기 흐름 유지하면서 처리
       if (playPromise && typeof playPromise.then === 'function') {
         let settled = false;
-        playPromise.then(()=>{ settled = true; onSuccess(); })
-                   .catch(async (_)=>{ await fallbackDecode(ctx); });
+        const onOK = ()=>{ settled = true; onSuccess(a); };
+        playPromise.then(onOK).catch(()=>fallbackDecode(ctx));
 
-        // 1200ms 내 playing 이벤트가 안 오면 폴백 시도
-        const timer = setTimeout(async ()=>{
-          if (!settled && a.paused) { await fallbackDecode(ctx); }
-        }, 1200);
-
-        a.addEventListener('playing', ()=>{ clearTimeout(timer); onSuccess(); }, { once:true });
+        const timer = setTimeout(()=>{ if (!settled && a.paused) fallbackDecode(ctx); }, 1200);
+        a.addEventListener('playing', ()=>{ clearTimeout(timer); onOK(); }, { once:true });
       } else {
-        // Promise 미지원 브라우저: playing 이벤트로 판단
-        const t = setTimeout(async ()=>{ if (a.paused) await fallbackDecode(ctx); }, 1200);
-        a.addEventListener('playing', ()=>{ clearTimeout(t); onSuccess(); }, { once:true });
+        const t = setTimeout(()=>{ if (a.paused) fallbackDecode(ctx); }, 1200);
+        a.addEventListener('playing', ()=>{ clearTimeout(t); onSuccess(a); }, { once:true });
       }
 
-      function onSuccess(){
+      function onSuccess(audioEl){
+        document.body.classList.add('playing');
         const ov = document.getElementById('overlay');
         if (ov) ov.style.display = 'none';
-        // 앱 전환 후 복귀 시 끊기면 재시도
+
         document.addEventListener('visibilitychange', ()=>{
-          if (!document.hidden && a.paused) { a.play().catch(()=>{}); }
+          if (!document.hidden && audioEl.paused) { audioEl.play().catch(()=>{}); }
         });
       }
 
-      // ---- 4) 최후 폴백: WebAudio로 m4a 직접 디코딩 후 재생
       async function fallbackDecode(ctxInstance){
-        // 이미 overlay 문구 업데이트
-        const ov = document.getElementById('overlay');
-        if (ov) ov.firstChild.textContent = '재생 준비중… (폴백 중)';
-
         try {
           const resp = await fetch(FILE_URL, { cache: 'force-cache' });
           if (!resp.ok) throw new Error('HTTP '+resp.status);
           const arr = await resp.arrayBuffer();
-
           const buf = await new Promise((res, rej)=> {
-            try { ctxInstance.decodeAudioData(arr, res, rej); }
-            catch(e){ rej(e); }
+            try { ctxInstance.decodeAudioData(arr, res, rej); } catch(e){ rej(e); }
           });
-
           const node = ctxInstance.createBufferSource();
           node.buffer = buf;
           node.connect(ctxInstance.destination);
           node.start(0);
 
+          document.body.classList.add('playing');
+          const ov = document.getElementById('overlay');
           if (ov) ov.style.display = 'none';
         } catch(e) {
-          // 그래도 실패 → 사용자 환경 이슈 (무음 스위치/사이트 음소거 등)
-          if (ov) ov.firstChild.textContent = '재생 실패 ❌  (무음 스위치/볼륨/사이트 음소거 확인 후 다시 터치)';
-          started = false; // 재시도 허용
+          // 실패 시 다시 시도 가능하도록
+          const ov = document.getElementById('overlay');
+          if (ov) ov.style.display = 'flex';
+          started = false;
           bindOnce();
         }
       }
 
-    } catch(eOuter) {
-      // AudioContext조차 안되면 마지막 안내
-      const ov = document.getElementById('overlay');
-      if (ov) ov.firstChild.textContent = '재생 실패 ❌  (브라우저/OS 제한)';
+    } catch(eOuter){
+      // 브라우저/OS 제한
       started = false;
       bindOnce();
     }
   }
 
-  bindOnce(); // 초기 바인딩
+  bindOnce();
 })();
 </script>
 </body>
