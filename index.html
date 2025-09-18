@@ -3,127 +3,212 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Tap Anywhere to Play (m4a)</title>
+<title>Tap Anywhere to Play</title>
 <style>
   html,body{height:100%;margin:0}
-  #overlay{
-    position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
-    font:16px/1.5 system-ui,-apple-system,Roboto,Arial,sans-serif;
-    color:#fff; background:rgba(0,0,0,.65); text-align:center; padding:24px; cursor:pointer; user-select:none;
-  }
-  #hint{opacity:.8; font-size:13px; margin-top:8px}
+  #overlay{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+           background:rgba(0,0,0,.7);color:#fff;font:16px/1.5 system-ui,-apple-system,Roboto,Arial,sans-serif;
+           text-align:center;padding:20px;gap:10px}
+  #log{position:fixed;left:0;right:0;bottom:0;max-height:40vh;overflow:auto;background:#111;color:#0f0;
+       font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;padding:8px;opacity:.9}
+  button{font:inherit;padding:.6em 1em;border-radius:8px;border:none;cursor:pointer}
 </style>
 </head>
 <body>
   <div id="overlay">
-    화면을 터치하면 음성이 재생됩니다
-    <div id="hint">(iOS는 무음 스위치/볼륨에 영향받을 수 있습니다)</div>
+    <div id="msg">화면 아무 곳이나 터치하면 재생됩니다</div>
+    <div id="hint" style="opacity:.8;font-size:13px">
+      (iPhone은 무음 스위치/볼륨/사이트 음소거에 영향)
+    </div>
+    <button id="retry" style="display:none">다시 시도</button>
   </div>
+  <pre id="log"></pre>
 
 <script>
 (function(){
   const FILE_URL = "https://sinchangsuk.github.io/Changsuk_1/test.m4a";
 
-  // ------- 1) HTMLAudio로 즉시 재생 시도 -------
-  async function tryHTMLAudioPlay(){
-    const a = new Audio();
-    a.setAttribute('playsinline','');  // iOS 인라인 재생
-    a.preload = "auto";
-    a.src = FILE_URL;                  // 제스처 시점에 src 세팅
-    a.volume = 1.0;
+  const overlay = document.getElementById('overlay');
+  const msg = document.getElementById('msg');
+  const logEl = document.getElementById('log');
+  const retryBtn = document.getElementById('retry');
 
-    // 포그라운드 복귀 시 재시도
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && a.paused) a.play().catch(()=>{});
+  function log(...args){
+    const t = new Date().toISOString().slice(11,19);
+    const line = `[${t}] ` + args.map(a => (typeof a==='string'?a:JSON.stringify(a))).join(' ') + '\n';
+    logEl.textContent += line;
+    logEl.scrollTop = logEl.scrollHeight;
+    console.log(...args);
+  }
+  function setMsg(text){ msg.textContent = text; }
+  function hideOverlay(){ overlay.style.display='none'; }
+
+  // ------------ 네트워크/헤더 사전 확인 (HTML만으로 가능) ------------
+  // HEAD가 막히는 서버도 있어서 GET으로 최소 헤더만 읽음
+  fetch(FILE_URL, { method: 'GET', cache: 'no-store' }).then(resp => {
+    log('fetch status', resp.status);
+    log('content-type', resp.headers.get('content-type'));
+    log('accept-ranges', resp.headers.get('accept-ranges'));
+    // body를 소비하지 않도록 중단 (헤더만 확인용)
+    if (resp.body && resp.body.cancel) try{resp.body.cancel();}catch(_){}
+  }).catch(e => log('prefetch error', e.name, e.message));
+
+  // ------------ 1) HTMLAudio 직접 재생 (타임아웃 폴백) ------------
+  async function playWithHTMLAudio(timeoutMs=1500){
+    return new Promise(async (resolve, reject) => {
+      try {
+        const a = new Audio();
+        a.setAttribute('playsinline','');
+        a.preload = "auto";
+        a.src = FILE_URL;
+        a.volume = 1.0;
+
+        // 이벤트 로깅
+        ['loadstart','loadedmetadata','canplay','canplaythrough','play','playing','pause','waiting','stalled','suspend','ended','error','timeupdate']
+          .forEach(ev => a.addEventListener(ev, () => log('<audio>', ev)));
+
+        const to = setTimeout(() => {
+          log('<audio> play() timeout, fallback');
+          // 타임아웃이면 실패로 간주하고 중단
+          try{ a.pause(); }catch(_){}
+          reject(new Error('htmlaudio-timeout'));
+        }, timeoutMs);
+
+        await a.play(); // 제스처 컨텍스트 내에서 호출될 예정
+        clearTimeout(to);
+
+        // playing 이벤트 도착 및 볼륨 이슈 방지 체크
+        const onPlaying = () => {
+          a.removeEventListener('playing', onPlaying);
+          resolve(a);
+        };
+        a.addEventListener('playing', onPlaying);
+
+        // 혹시 playing이 안 오면 300ms 후 강제 resolve (일부 브라우저 이벤트 유실)
+        setTimeout(() => {
+          try{
+            if (!a.paused) {
+              log('<audio> playing event missed; continuing');
+              resolve(a);
+            }
+          }catch(_){}
+        }, 300);
+
+        // 포그라운드 복귀시 끊기면 재시도
+        document.addEventListener('visibilitychange', () => {
+          if (!document.hidden && a.paused) a.play().catch(()=>{});
+        });
+
+      } catch (e) {
+        reject(e);
+      }
     });
-
-    await a.play(); // 제스처 컨텍스트 내 동기 호출
-    return a;       // 성공 시 오디오 객체 반환
   }
 
-  // ------- 2) 실패 시 Web Audio로 디코드 재생 -------
-  async function tryWebAudioPlay(){
+  // ------------ 2) WebAudio 디코딩 재생 ------------
+  async function playWithWebAudio(){
     const AC = window.AudioContext || window.webkitAudioContext;
-    if (!AC) throw new Error("AudioContext not supported");
+    if (!AC) throw new Error('no-audiocontext');
 
     const ctx = new AC();
-    if (ctx.state === "suspended") {
-      try { await ctx.resume(); } catch(_) {}
-    }
+    if (ctx.state === 'suspended') { try{ await ctx.resume(); }catch(_){ } }
 
-    // 동일 출처에서 가져와야 CORS 이슈 없음
-    const resp = await fetch(FILE_URL, { cache: "force-cache" });
-    if (!resp.ok) throw new Error("HTTP "+resp.status);
+    const t0 = performance.now();
+    const resp = await fetch(FILE_URL, { cache: 'force-cache', mode: 'cors' });
+    log('webaudio fetch status', resp.status);
+    if (!resp.ok) throw new Error('fetch-failed-'+resp.status);
 
     const arr = await resp.arrayBuffer();
+    log('webaudio bytes', arr.byteLength, `(${Math.round(arr.byteLength/1024)} KB)`);
 
-    // iOS 호환: 콜백 래핑 사용
-    const buf = await new Promise((res, rej)=> ctx.decodeAudioData(arr, res, rej));
+    // decodeAudioData 콜백 래핑 (iOS 호환)
+    const buf = await new Promise((res, rej)=> {
+      try {
+        const done = (b)=>res(b);
+        const fail = (e)=>rej(e);
+        // 일부 사파리는 promise가 아닌 콜백만 신뢰
+        ctx.decodeAudioData(arr, done, fail);
+      } catch(e) { rej(e); }
+    });
 
+    log('webaudio decode ms', Math.round(performance.now()-t0));
     const src = ctx.createBufferSource();
     src.buffer = buf;
     src.connect(ctx.destination);
     src.start(0);
-
-    // 재생 컨트롤 객체처럼 반환 (paused=false로 간주)
-    return { paused:false, _ctx:ctx };
+    return { paused:false, _ctx:ctx, _src:src };
   }
 
-  // ------- 3) 터치(어디든) → 재생 시퀀스 -------
-  let started = false;
+  // ------------ 3) 시작 시퀀스 (터치 한 번) ------------
+  let starting = false;
   async function start(){
-    if (started) return; started = true;
-    setOverlay("재생 준비 중…");
+    if (starting) return;
+    starting = true;
+    setMsg('재생 준비중…');
+    log('start touch');
 
-    // 3-1) HTMLAudio 우선
+    // 1차: HTMLAudio (1.5초 내 반응 없으면 폴백)
     try {
-      await tryHTMLAudioPlay();
+      const a = await playWithHTMLAudio(1500);
+      setMsg('재생 중 ✅ (HTMLAudio)');
       hideOverlay();
+      log('HTMLAudio success');
       return;
-    } catch (e1) {
-      console.log("[HTMLAudio] failed:", e1?.name, e1?.message || e1);
+    } catch(e1) {
+      log('HTMLAudio failed', e1 && (e1.name||e1.message||String(e1)));
     }
 
-    // 3-2) WebAudio 백업
+    // 2차: WebAudio
     try {
-      await tryWebAudioPlay();
+      await playWithWebAudio();
+      setMsg('재생 중 ✅ (WebAudio)');
       hideOverlay();
+      log('WebAudio success');
       return;
-    } catch (e2) {
-      console.log("[WebAudio] failed:", e2?.name, e2?.message || e2);
+    } catch(e2) {
+      log('WebAudio failed', e2 && (e2.name||e2.message||String(e2)));
     }
 
-    // 3-3) 짧은 지연 후 마지막 재시도 (네트워크 지연/첫터치 타이밍 문제 보정)
-    setOverlay("재시도 중…");
+    // 3차: 짧은 재시도
+    setMsg('재시도 중…');
     setTimeout(async () => {
       try {
-        await tryHTMLAudioPlay();
+        const a2 = await playWithHTMLAudio(1200);
+        setMsg('재생 중 ✅ (HTMLAudio-retry)');
         hideOverlay();
+        log('HTMLAudio retry success');
       } catch(e3) {
-        console.log("[HTMLAudio retry] failed:", e3?.name, e3?.message || e3);
+        log('HTMLAudio retry failed', e3 && (e3.name||e3.message||String(e3)));
         try {
-          await tryWebAudioPlay();
+          await playWithWebAudio();
+          setMsg('재생 중 ✅ (WebAudio-retry)');
           hideOverlay();
-        } catch(e4){
-          console.log("[WebAudio retry] failed:", e4?.name, e4?.message || e4);
-          setOverlay("재생 실패 ❌\n• iPhone 무음 스위치/볼륨 확인\n• 크롬 사이트 음소거 해제\n• 네트워크 상태 점검 후 다시 터치");
-          started = false; // 사용자가 다시 터치하면 재시작 가능
+          log('WebAudio retry success');
+        } catch(e4) {
+          log('WebAudio retry failed', e4 && (e4.name||e4.message||String(e4)));
+          setMsg('재생 실패 ❌  (무음 스위치/볼륨/사이트 음소거/네트워크 확인)');
+          retryBtn.style.display = 'inline-block';
+          starting = false; // 다시 시도 허용
         }
       }
-    }, 60);
+    }, 80);
   }
 
-  // ------- 4) 어디든 첫 터치 바인딩 -------
-  const overlay = document.getElementById('overlay');
-  function hideOverlay(){ if (overlay) overlay.style.display = 'none'; }
-  function setOverlay(msg){ if (overlay) overlay.firstChild.textContent = msg; }
-
-  // pointerdown이 가장 확실, 보강으로 touchend/click도
+  // 어디든 첫 제스처
   document.addEventListener('pointerdown', start, { once:true, passive:true });
   document.addEventListener('touchend',    start, { once:true, passive:true });
   document.addEventListener('click',       start, { once:true });
 
-  // (선택) iOS에서 간혹 첫 로드 후 사용자 제스처까지 시간이 길면 오디오 디코더가 냉기동 상태 → 문제없음.
+  retryBtn.addEventListener('click', start);
+
+  // ------------- 자주 막히는 포인트 체크 가이드 -------------
+  log('page origin', location.origin);
+  log('file url', FILE_URL);
+  log('Note:',
+      '1) 이 HTML을 https://sinchangsuk.github.io/Changsuk_1/ 아래에서 여세요.',
+      '2) iOS 무음 스위치/볼륨/크롬 사이트 음소거 상태 확인',
+      '3) iframe 금지 (부득이하면 allow="autoplay")',
+      '4) content-type은 audio/mp4 이어야 가장 안전');
 })();
 </script>
 </body>
