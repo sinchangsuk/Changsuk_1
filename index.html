@@ -1,97 +1,85 @@
 <!doctype html>
-<html lang="ko">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Touch-to-Play</title>
-  <style>
-    #tapOverlay{
-      position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
-      background: rgba(0,0,0,.6); color:#fff; font:16px/1.5 system-ui, -apple-system, sans-serif;
-      z-index:9999; text-align:center; padding:24px;
-    }
-  </style>
-</head>
-<body>
-  <audio id="bgm" preload="auto" src="https://sinchangsuk.github.io/Changsuk_1/test.m4a"></audio>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tap Anywhere to Play (m4a)</title>
+<style>
+  #tap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+  background:rgba(0,0,0,.6);color:#fff;font:16px/1.5 system-ui,-apple-system,Roboto,Arial,sans-serif}
+</style>
 
-  <div id="tapOverlay">화면을 터치하면 음성이 재생됩니다</div>
+<div id="tap">화면을 터치하면 재생됩니다</div>
 
-  <script>
-  (function(){
-    const audio = document.getElementById('bgm');
-    const overlay = document.getElementById('tapOverlay');
+<script>
+(function(){
+  const URL_M4A = "https://sinchangsuk.github.io/Changsuk_1/test.m4a";
 
-    // iOS에서 제스처 맥락을 놓치지 않도록, 페이지 로드 즉시 핸들러 바인딩
-    // scroll 제스처에도 잡히도록 pointerdown + touchend + click 모두 등록
-    const optsPassive = { passive: true, once: true };
-    const optsOnce = { once: true };
+  let started = false;
+  async function start(){
+    if (started) return; started = true;
 
-    // iOS 일부 버전은 metadata가 없으면 play() 실패 → canplay 이벤트 대기 후 play 보강
-    let tried = false;
-    function playNow(){
-      if (tried) return;
-      tried = true;
+    // ① 제스처 안에서 "그때" 생성 + src 세팅
+    const a = new Audio();
+    a.preload = "auto";
+    a.playsInline = true;  // iOS
+    a.src = URL_M4A;       // 여기서 세팅해야 제스처 맥락 유지 확률↑
+    a.volume = 1.0;
 
-      const tryPlay = async () => {
-        try {
-          // iOS에서 가끔 첫 프레임 음소거 후 즉시 해제해야 성공률↑
-          audio.muted = true;
-          // 로딩 타이밍 문제를 줄이기 위해 강제 load
-          audio.load();
+    try {
+      // ② 바로 play() (동기 맥락)
+      await a.play();
+      document.getElementById('tap').style.display = 'none';
 
-          // metadata가 아직이면 바로 실패할 수 있으므로 한번 시도
-          await audio.play();
-          // 다음 프레임에서 음소거 해제
-          requestAnimationFrame(()=> audio.muted = false);
-          hideOverlay();
-        } catch (e) {
-          // canplay/canplaythrough 오면 다시 시도
-          const onReady = async () => {
-            audio.removeEventListener('canplay', onReady);
-            audio.removeEventListener('canplaythrough', onReady);
-            try {
-              audio.muted = true;
-              await audio.play();
-              requestAnimationFrame(()=> audio.muted = false);
-              hideOverlay();
-            } catch(e2) {
-              // 마지막 방어: 사용자 제스처를 또 기다리지 않고 한번 더
-              setTimeout(async () => {
-                try { await audio.play(); hideOverlay(); } catch(_){}
-              }, 50);
-            }
-          };
-          audio.addEventListener('canplay', onReady, optsOnce);
-          audio.addEventListener('canplaythrough', onReady, optsOnce);
-        }
-      };
+      // ③ 백그라운드 복귀시 끊기면 재시도
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && a.paused) a.play().catch(()=>{});
+      });
 
-      tryPlay();
-      removeAll();
+    } catch (e) {
+      console.log('HTMLAudio failed:', e);
+      // 실패시 WebAudio 백업으로 전환
+      startWebAudio();
     }
 
-    function hideOverlay(){ if (overlay) overlay.style.display = 'none'; }
-    function removeAll(){
-      document.removeEventListener('pointerdown', playNow, optsPassive);
-      document.removeEventListener('touchend',   playNow, optsPassive);
-      document.removeEventListener('click',      playNow, optsOnce);
-    }
+    remove();
+  }
 
-    document.addEventListener('pointerdown', playNow, optsPassive);
-    document.addEventListener('touchend',    playNow, optsPassive);
-    document.addEventListener('click',       playNow, optsOnce);
+  function remove(){
+    document.removeEventListener('pointerdown', start, {once:true});
+    document.removeEventListener('touchend', start, {once:true});
+    document.removeEventListener('click', start, {once:true});
+  }
 
-    // 백그라운드 → 포그라운드 복귀 시 소리 끊기면 재시도
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && audio.paused === true && tried) {
-        audio.play().catch(()=>{});
+  document.addEventListener('pointerdown', start, { once:true, passive:true });
+  document.addEventListener('touchend',    start, { once:true, passive:true });
+  document.addEventListener('click',       start, { once:true });
+
+  // ---- WebAudio 백업 ----
+  function startWebAudio(){
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return; // 구형 브라우저
+    const ctx = new AC();
+
+    const tryStart = async () => {
+      try { if (ctx.state === 'suspended') await ctx.resume(); } catch(_){}
+      try {
+        const resp = await fetch(URL_M4A, { cache: 'force-cache' }); // 동일 출처
+        if (!resp.ok) throw new Error('HTTP '+resp.status);
+        const arr = await resp.arrayBuffer();
+        const buf = await new Promise((res, rej)=> ctx.decodeAudioData(arr, res, rej));
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(ctx.destination);
+        src.start(0);
+        document.getElementById('tap').style.display = 'none';
+      } catch(err){
+        console.log('WebAudio failed:', err);
+        // 여전히 실패면 사용자에게 볼륨/무음/코덱 메시지
+        const t = document.getElementById('tap');
+        t.textContent = '재생 실패: iOS 무음 스위치/볼륨 또는 파일 코덱(AAC-LC) 확인 후 다시 터치';
+        started = false; // 재시도 허용
       }
-    });
-
-    // iOS 17 계열에서 종종 첫 프레임이 늦게 열릴 때 대비
-    audio.addEventListener('error', () => { console.log('Audio error', audio.error); });
-  })();
-  </script>
-</body>
-</html>
+    };
+    tryStart();
+  }
+})();
+</script>
